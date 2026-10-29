@@ -740,6 +740,92 @@ def test_opencode_python_uninstall_removes_loader_and_keeps_shared_package_per_s
     assert not package_root.exists()
 
 
+def test_opencode_python_install_and_uninstall_patch_every_config_in_scope(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    package_root = tmp_path / "state" / "opencode" / "claude-smart"
+    (package_root / "plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_OPENCODE_LOCAL_PACKAGE_DIR", package_root)
+    monkeypatch.setattr(cli, "_opencode_install_supported_from_this_package", lambda: True)
+    monkeypatch.setattr(cli, "_opencode_prerequisite_error", lambda: None)
+    monkeypatch.setattr(cli, "_configure_reflexio_setup", lambda host: False)
+    monkeypatch.setattr(cli, "_persist_opencode_path", lambda: [])
+    monkeypatch.setattr(cli, "_has_extraction_provider", lambda: True)
+    monkeypatch.setattr(
+        cli, "_bootstrap_opencode_install", lambda read_only: (True, str(package_root))
+    )
+    monkeypatch.setattr(cli, "_run_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_repair_plugin_root", lambda host: None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    project = tmp_path / "project"
+    (project / ".opencode").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    root_config = project / "opencode.json"
+    nested_config = project / ".opencode" / "opencode.json"
+
+    def seed() -> None:
+        # The root config wins _opencode_config_path, so the nested entry was
+        # the one left behind.
+        root_config.write_text(json.dumps({"plugin": ["claude-smart", "other"]}) + "\n")
+        nested_config.write_text(json.dumps({"plugin": [package_root.as_uri()]}) + "\n")
+
+    seed()
+    rc = cli.cmd_install(argparse.Namespace(host="opencode", global_config=False))
+    assert rc == 0
+    assert json.loads(root_config.read_text())["plugin"] == ["other"]
+    assert json.loads(nested_config.read_text())["plugin"] == []
+    out = capsys.readouterr().out
+    assert str(root_config) in out and str(nested_config) in out
+
+    seed()
+    rc = cli.cmd_uninstall(argparse.Namespace(host="opencode", global_config=False))
+    assert rc == 0
+    assert json.loads(root_config.read_text())["plugin"] == ["other"]
+    assert json.loads(nested_config.read_text())["plugin"] == []
+    # Nothing in either scope references the package any more.
+    assert not package_root.exists()
+
+
+def test_opencode_python_uninstall_keeps_package_for_entry_in_second_config(
+    monkeypatch, tmp_path
+) -> None:
+    package_root = tmp_path / "state" / "opencode" / "claude-smart"
+    (package_root / "plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_OPENCODE_LOCAL_PACKAGE_DIR", package_root)
+    monkeypatch.setattr(cli, "_run_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_repair_plugin_root", lambda host: None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    project = tmp_path / "project"
+    (project / ".opencode").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    # An invalid second config must stop the uninstall before any config
+    # changes or the package is deleted.
+    (project / "opencode.json").write_text(json.dumps({"plugin": ["claude-smart"]}) + "\n")
+    bad = project / ".opencode" / "opencode.json"
+    bad.write_text(json.dumps({"plugin": "not-a-list"}) + "\n")
+
+    rc = cli.cmd_uninstall(argparse.Namespace(host="opencode", global_config=False))
+
+    assert rc == 1
+    assert json.loads((project / "opencode.json").read_text())["plugin"] == ["claude-smart"]
+    assert package_root.exists()
+
+
+def test_opencode_python_loader_read_treats_unreadable_paths_as_foreign(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "claude-smart.js"
+    assert cli._read_opencode_v2_loader(target) is None
+    # Bytes the locale codec may reject: still a foreign file, not a crash.
+    target.write_bytes(b"// hand-written \xff\xfe\n")
+    assert cli._read_opencode_v2_loader(target) is not None
+    assert not cli._is_generated_opencode_v2_loader(cli._read_opencode_v2_loader(target))
+    # A directory at the loader path is not a free slot.
+    target.unlink()
+    target.mkdir()
+    assert cli._read_opencode_v2_loader(target) == ""
+
+
 def test_opencode_python_loader_body_matches_node_loader(tmp_path: Path) -> None:
     if shutil_which_node() is None:
         pytest.skip("node is not installed")

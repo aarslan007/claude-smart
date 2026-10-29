@@ -2894,6 +2894,90 @@ def test_node_opencode_global_uninstall_reads_every_project_config_form(
     assert (package_root / "scripts" / "backend-service.sh").exists()
 
 
+def test_node_opencode_uninstall_removes_entries_from_every_project_config(
+    tmp_path: Path,
+) -> None:
+    # The root config wins opencodeConfigPath, so an entry in .opencode/ was
+    # left behind still pointing at the package uninstall then deleted.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for Node installer test")
+    package_root = tmp_path / ".claude-smart" / "opencode" / "claude-smart" / "plugin"
+    (package_root / "scripts").mkdir(parents=True)
+    _write_executable(package_root / "scripts" / "backend-service.sh", "#!/bin/sh\nexit 0\n")
+    project = tmp_path / "project"
+    (project / ".opencode").mkdir(parents=True)
+    root_config = project / "opencode.json"
+    root_config.write_text('{"plugin": ["claude-smart", "other"]}\n')
+    nested_config = project / ".opencode" / "opencode.json"
+    nested_config.write_text('{"plugin": ["%s"]}\n' % package_root.parent.as_uri())
+    env = _isolated_env(tmp_path)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+
+    result = subprocess.run(
+        [node, str(NODE_INSTALLER), "uninstall", "--host", "opencode"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(root_config.read_text())["plugin"] == ["other"]
+    assert json.loads(nested_config.read_text())["plugin"] == []
+    assert str(nested_config) in result.stdout
+    assert not package_root.exists()
+
+
+def test_node_opencode_uninstall_validates_every_config_before_writing(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for Node installer test")
+    package_root = tmp_path / ".claude-smart" / "opencode" / "claude-smart" / "plugin"
+    (package_root / "scripts").mkdir(parents=True)
+    _write_executable(package_root / "scripts" / "backend-service.sh", "#!/bin/sh\nexit 0\n")
+    project = tmp_path / "project"
+    (project / ".opencode").mkdir(parents=True)
+    root_text = '{"plugin": ["claude-smart"]}\n'
+    (project / "opencode.json").write_text(root_text)
+    (project / ".opencode" / "opencode.json").write_text('{"plugin": "not-a-list"}\n')
+    env = _isolated_env(tmp_path)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+
+    result = subprocess.run(
+        [node, str(NODE_INSTALLER), "uninstall", "--host", "opencode"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert (project / "opencode.json").read_text() == root_text
+    assert (package_root / "scripts" / "backend-service.sh").exists()
+
+
+def test_node_opencode_loader_path_that_is_a_directory_is_not_free(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for Node installer test")
+    loader = tmp_path / "project" / ".opencode" / "plugins" / "claude-smart.js"
+    loader.mkdir(parents=True)
+    script = (
+        f"const i = require({json.dumps(str(NODE_INSTALLER))});"
+        f"process.stdout.write(JSON.stringify(i.openCodeV2LoaderConflicts([], {json.dumps(str(tmp_path / 'project'))})));"
+    )
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) is True
+
+
 def test_windows_interrupt_ends_the_whole_child_tree(tmp_path: Path) -> None:
     # Windows has no process groups; stopping only the direct child would
     # orphan uv/npm grandchildren that keep writing after the rollback.
